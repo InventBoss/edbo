@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.14.10"
+__generated_with = "0.14.13"
 app = marimo.App()
 
 
@@ -67,6 +67,7 @@ def _(io, pd, user_file):
     else:
         suzuki_data = pd.read_csv("data/suzuki_data.csv")
 
+    suzuki_data.dropna(subset=suzuki_data.columns)
     suzuki_data
     return (suzuki_data,)
 
@@ -203,7 +204,7 @@ def _(experiment_index, extra_column_list, suzuki_data):
 def _(mo):
     mo.md(
         r"""
-    # Specifying Model Objective
+    ## Specifying Model Objective
 
     Here you specify which column you want the Bayesian Optimization to optimize for.
     """
@@ -231,31 +232,42 @@ def _(objective_input):
 @app.cell
 def _(experiment_index, objective, suzuki_data):
     # Create a domain with the objective for the model
-    experiment_domain = experiment_index.copy()
-    experiment_domain[f"{objective}"] = suzuki_data[f"{objective}"]
-    return (experiment_domain,)
+    final_index = experiment_index.copy()
+    final_index[f"{objective}"] = suzuki_data[f"{objective}"].values
+    final_index = final_index.dropna(subset=experiment_index.columns)
+    final_index
+    return (final_index,)
 
 
 @app.cell
-def _():
-    # experiment_index_domain = experiment_index.drop("yield", axis=1).drop(
-    #     "TON", axis=1
-    # )
-    return
+def _(BO, final_index, objective):
+    from gpytorch.priors import GammaPrior
 
-
-@app.cell
-def _(BO, experiment_domain, experiment_index):
     bo = BO(
-        exindex=experiment_domain,
-        domain=experiment_index,
-        batch_size=3,
+        exindex=final_index,
+        domain=final_index.drop(f"{objective}", axis=1),
+        batch_size=5,
         acquisition_function="EI",
         fast_comp=True,
-        target="TON",
+        target=f"{objective}",
+        init_method="kmeans",
+        noise_constraint=1e+1,
+        matern_nu=2.5,
+        lengthscale_prior=[
+            GammaPrior(2.0, 1.0),
+            5.0,
+        ],
+        outputscale_prior=[
+            GammaPrior(5.0, 0.5),
+            8.0,
+        ],
+        noise_prior=[
+            GammaPrior(1.0, 1.0),
+            1.0,
+        ],
     )
-    bo.simulate(iterations=25, seed=1)
-    return (bo,)
+    bo.simulate(iterations=15, seed=0)
+    return GammaPrior, bo
 
 
 @app.cell
@@ -266,12 +278,73 @@ def _(bo):
 
 @app.cell
 def _(bo, suzuki_data):
-    from edbo.plot_utils import plot_avg_convergence
-
     results = []
     results.append(bo.obj.results_input()["entry"].values)
 
     suzuki_data[suzuki_data["entry"].isin(results[0])]
+    return
+
+
+@app.cell
+def _(BO, GammaPrior, final_index, objective, pd):
+    from edbo.plot_utils import average_convergence, plot_avg_convergence
+
+    simulation_results = []
+    index_results = []
+
+    for simulation_loop in range(30):
+        bo_simulation = BO(
+            exindex=final_index,
+            domain=final_index.drop(f"{objective}", axis=1),
+            batch_size=5,
+            acquisition_function="EI",
+            fast_comp=True,
+            target=f"{objective}",
+            init_method="kmeans",
+            noise_constraint=1e-2,
+            matern_nu=2.5,
+            lengthscale_prior=[
+                GammaPrior(2.0, 1.0),
+                5.0,
+            ],
+            outputscale_prior=[
+                GammaPrior(5.0, 0.5),
+                8.0,
+            ],
+            noise_prior=[
+                GammaPrior(1.0, 1.0),
+                1.0,
+            ],
+        )
+
+        bo_simulation.init_seq.visualize = False
+        bo_simulation.simulate(iterations=15, seed=simulation_loop)
+
+        simulation_results.append(bo_simulation.obj.results_input()[f'{objective}'].values)
+        index_results.append(bo_simulation.obj.results_input()["entry"].values)
+
+    simulation_results = pd.DataFrame(simulation_results)
+    index, mean, std = average_convergence(simulation_results, 5)
+    return index_results, plot_avg_convergence, simulation_results
+
+
+@app.cell
+def _(index_results, plot_avg_convergence, simulation_results, suzuki_data):
+    plot_avg_convergence(simulation_results, 5)
+    ran_experiments = suzuki_data[suzuki_data["entry"].isin([item for sublist in index_results for item in sublist])]
+    ran_experiments
+    return (ran_experiments,)
+
+
+@app.cell
+def _(column_list, ran_experiments, simulation_results):
+    batch_size = 5
+
+    # Make the file name "column1_column2_..._column_n.cvs"
+    file_name = "_".join(column_list) 
+
+    ran_experiments.to_csv(path_or_buf=f"./{file_name}_experiments.csv", index=False)
+    simulation_results.to_csv(path_or_buf=f"./{file_name}_results_batch_size={batch_size}.csv")
     return
 
 
